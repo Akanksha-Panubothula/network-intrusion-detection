@@ -1,0 +1,5 @@
+dataset/
+preprocessing/
+data_understanding/
+__pycache__/
+*.pyc
