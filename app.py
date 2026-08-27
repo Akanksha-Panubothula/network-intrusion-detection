@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import pickle
+import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -45,6 +46,23 @@ def find_file(names):
         matches = list(BASE.rglob(name))
         if matches:
             return matches[0]
+    return None
+
+
+def load_artifact(path):
+    """Load either joblib- or pickle-saved model artifacts."""
+    if path is None:
+        return None
+    errors = []
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        errors.append(e)
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        errors.append(e)
     return None
 
 RF_PATH = find_file([
@@ -541,18 +559,12 @@ def load_live_model():
     # Preferred: pre-trained 15-feature model artifacts.
     if SMALL_RF_PATH is not None:
         try:
-            with open(SMALL_RF_PATH, "rb") as f:
-                model = pickle.load(f)
+            model = load_artifact(SMALL_RF_PATH)
 
-            encoder = None
-            if SMALL_ENCODER_PATH is not None:
-                with open(SMALL_ENCODER_PATH, "rb") as f:
-                    encoder = pickle.load(f)
+            encoder = load_artifact(SMALL_ENCODER_PATH)
 
-            features = None
-            if SMALL_FEATURE_PATH is not None:
-                with open(SMALL_FEATURE_PATH, "rb") as f:
-                    features = [str(x) for x in pickle.load(f)]
+            features_obj = load_artifact(SMALL_FEATURE_PATH)
+            features = None if features_obj is None else [str(x) for x in features_obj]
 
             # If the feature file is missing, use the dashboard's fixed
             # 15-feature schema only when it matches the model's input count.
@@ -561,10 +573,12 @@ def load_live_model():
                 if expected == len(LIVE_FEATURES):
                     features = LIVE_FEATURES.copy()
 
+            expected = getattr(model, "n_features_in_", None)
             if (
                 model is not None
                 and features is not None
                 and len(features) == len(LIVE_FEATURES)
+                and (expected is None or expected == len(features))
             ):
                 return model, encoder, features
         except Exception:
@@ -834,9 +848,9 @@ with tab_live:
 
     if live_model is None:
         st.warning(
-            "⚠️ Live model is not available. "
-            "Add small_random_forest_model.pkl, small_label_encoder.pkl, "
-            "and small_feature_names.pkl to the project folder."
+            "⚠️ Live model could not be loaded. "
+            "The deployment expects the three small-model .pkl files in the "
+            "same GitHub project as app.py."
         )
 
     render('<div class="input-panel">', unsafe_allow_html=True)
