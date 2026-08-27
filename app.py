@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 import pickle
@@ -70,6 +71,21 @@ FEATURE_PATH = find_file([
     "feature_names.pkl",
     "features.pkl",
     "model_features.pkl",
+])
+
+# Pre-trained 15-feature live inference artifacts.
+# These are loaded directly on Streamlit Cloud; no large dataset
+# or model retraining is required at startup.
+SMALL_RF_PATH = find_file([
+    "small_random_forest_model.pkl",
+])
+
+SMALL_ENCODER_PATH = find_file([
+    "small_label_encoder.pkl",
+])
+
+SMALL_FEATURE_PATH = find_file([
+    "small_feature_names.pkl",
 ])
 
 # ============================================================
@@ -509,97 +525,112 @@ def numeric_series(series, feature_name):
         errors="coerce"
     ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
-@st.cache_resource(show_spinner="Preparing the 15-feature live Random Forest...")
-def train_live_model(dataset_path):
+@st.cache_resource(show_spinner="Loading the 15-feature live Random Forest...")
+def load_live_model():
     """
-    Train a separate 15-feature Random Forest from the project's
-    existing labeled CIC-IDS2017 clean dataset.
+    Load the already-trained 15-feature Random Forest used for live inference.
 
-    This does NOT modify the original 79-feature model or the
-    Model Evaluation page.
+    Deployment-safe path:
+      small_random_forest_model.pkl
+      small_label_encoder.pkl
+      small_feature_names.pkl
+
+    The large CIC-IDS2017 clean dataset is NOT required for deployment.
+    A local-training fallback is intentionally kept for development machines
+    that do not yet have the small model artifacts.
     """
-    if dataset_path is None or not Path(dataset_path).exists():
+    # Preferred: pre-trained 15-feature model artifacts.
+    if SMALL_RF_PATH is not None:
+        try:
+            with open(SMALL_RF_PATH, "rb") as f:
+                model = pickle.load(f)
+
+            encoder = None
+            if SMALL_ENCODER_PATH is not None:
+                with open(SMALL_ENCODER_PATH, "rb") as f:
+                    encoder = pickle.load(f)
+
+            features = None
+            if SMALL_FEATURE_PATH is not None:
+                with open(SMALL_FEATURE_PATH, "rb") as f:
+                    features = [str(x) for x in pickle.load(f)]
+
+            # If the feature file is missing, use the dashboard's fixed
+            # 15-feature schema only when it matches the model's input count.
+            if features is None:
+                expected = getattr(model, "n_features_in_", None)
+                if expected == len(LIVE_FEATURES):
+                    features = LIVE_FEATURES.copy()
+
+            if (
+                model is not None
+                and features is not None
+                and len(features) == len(LIVE_FEATURES)
+            ):
+                return model, encoder, features
+        except Exception:
+            pass
+
+    # Development fallback: train from clean_dataset.csv if available.
+    # This path is NOT used on the deployed app when the small *.pkl files
+    # are present.
+    if DATASET_PATH is None or not Path(DATASET_PATH).exists():
         return None, None, None
 
-    df = pd.read_csv(dataset_path, low_memory=False)
+    try:
+        df = pd.read_csv(DATASET_PATH, low_memory=False)
+        label_col = find_label_column(df.columns)
+        if label_col is None:
+            return None, None, None
 
-    label_col = find_label_column(df.columns)
-    if label_col is None:
-        return None, None, None
-
-    matched = {}
-    missing = []
-
-    for feature in LIVE_FEATURES:
-        col = find_matching_column(
-            df.columns,
-            [feature] + LIVE_ALIASES.get(feature, [])
-        )
-        if col is None:
-            missing.append(feature)
-        else:
+        matched = {}
+        for feature in LIVE_FEATURES:
+            col = find_matching_column(
+                df.columns,
+                [feature] + LIVE_ALIASES.get(feature, [])
+            )
+            if col is None:
+                return None, None, None
             matched[feature] = col
 
-    if missing:
+        work = pd.DataFrame(index=df.index)
+        for feature in LIVE_FEATURES:
+            work[feature] = numeric_series(df[matched[feature]], feature)
+
+        y = df[label_col].astype(str).str.strip()
+        valid = y.ne("") & y.notna()
+        work = work.loc[valid].replace([np.inf, -np.inf], np.nan).fillna(0)
+        y = y.loc[valid]
+
+        tmp = work.copy()
+        tmp["_target_"] = y.values
+        parts = []
+        for _, group in tmp.groupby("_target_", sort=False):
+            if len(group) > 6000:
+                group = group.sample(n=6000, random_state=42)
+            parts.append(group)
+
+        train_df = pd.concat(parts, ignore_index=True)
+        X = train_df[LIVE_FEATURES].astype(np.float32)
+        target = train_df["_target_"].astype(str)
+
+        le = LabelEncoder()
+        y_encoded = le.fit_transform(target)
+
+        rf = RandomForestClassifier(
+            n_estimators=180,
+            max_depth=22,
+            min_samples_leaf=1,
+            class_weight="balanced_subsample",
+            random_state=42,
+            n_jobs=-1,
+        )
+        rf.fit(X, y_encoded)
+        return rf, le, LIVE_FEATURES.copy()
+    except Exception:
         return None, None, None
 
-    work = pd.DataFrame(index=df.index)
-
-    for feature in LIVE_FEATURES:
-        work[feature] = numeric_series(
-            df[matched[feature]],
-            feature
-        )
-
-    y = df[label_col].astype(str).str.strip()
-
-    valid = y.ne("") & y.notna()
-    work = work.loc[valid]
-    y = y.loc[valid]
-
-    # Remove unusable rows.
-    work = work.replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    # Balanced sampling keeps app startup practical on the huge
-    # CIC-IDS2017 dataset while preserving all classes.
-    tmp = work.copy()
-    tmp["_target_"] = y.values
-
-    max_per_class = 6000
-    parts = []
-
-    for _, group in tmp.groupby("_target_", sort=False):
-        if len(group) > max_per_class:
-            group = group.sample(
-                n=max_per_class,
-                random_state=42
-            )
-        parts.append(group)
-
-    train_df = pd.concat(parts, ignore_index=True)
-
-    X = train_df[LIVE_FEATURES].astype(np.float32)
-    y = train_df["_target_"].astype(str)
-
-    le = LabelEncoder()
-    y_encoded = le.fit_transform(y)
-
-    rf = RandomForestClassifier(
-        n_estimators=180,
-        max_depth=22,
-        min_samples_leaf=1,
-        class_weight="balanced_subsample",
-        random_state=42,
-        n_jobs=-1
-    )
-
-    rf.fit(X, y_encoded)
-
-    return rf, le, LIVE_FEATURES
-
-live_model, live_encoder, _ = train_live_model(
-    str(DATASET_PATH) if DATASET_PATH else None
-)
+live_model, live_encoder, live_features = load_live_model()
 
 # ============================================================
 # HELPERS
@@ -714,9 +745,11 @@ def run_live_prediction(X):
     if live_model is None or live_encoder is None:
         raise RuntimeError(
             "The 15-feature live model is unavailable. "
-            "Make sure clean_dataset.csv is available in the project."
+            "Make sure the three small-model .pkl files are in the project."
         )
 
+    expected_features = live_features or LIVE_FEATURES
+    X = X.reindex(columns=expected_features, fill_value=0).astype(np.float32)
     pred = live_model.predict(X)
     labels = [
         decode_prediction(live_model, live_encoder, p)
@@ -802,8 +835,9 @@ with tab_live:
 
     if live_model is None:
         st.warning(
-            "⚠️ Live model is not currently available. "
-            "Keep your processed clean_dataset.csv in the project folder."
+            "⚠️ Live model is not available. "
+            "Add small_random_forest_model.pkl, small_label_encoder.pkl, "
+            "and small_feature_names.pkl to the project folder."
         )
 
     render('<div class="input-panel">', unsafe_allow_html=True)
