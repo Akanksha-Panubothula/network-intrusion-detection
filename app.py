@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 import pickle
@@ -90,7 +91,7 @@ FEATURE_PATH = find_file([
     "model_features.pkl",
 ])
 
-# Pre-trained 15-feature live inference artifacts.
+# Pre-trained 10-feature live inference artifacts.
 # These are loaded directly on Streamlit Cloud; no large dataset
 # or model retraining is required at startup.
 SMALL_RF_PATH = find_file([
@@ -416,8 +417,9 @@ else:
 # pathway. The original 79-feature model is NOT changed.
 # ============================================================
 LIVE_FEATURES = [
-    "Protocol",
+    "Source Port",
     "Destination Port",
+    "Protocol",
     "Flow Duration",
     "Total Fwd Packets",
     "Total Backward Packets",
@@ -425,12 +427,6 @@ LIVE_FEATURES = [
     "Total Length of Bwd Packets",
     "Flow Bytes/s",
     "Flow Packets/s",
-    "Fwd Packet Length Mean",
-    "Bwd Packet Length Mean",
-    "Packet Length Mean",
-    "Packet Length Std",
-    "SYN Flag Count",
-    "ACK Flag Count",
 ]
 
 LIVE_ALIASES = {
@@ -542,10 +538,10 @@ def numeric_series(series, feature_name):
         errors="coerce"
     ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
-@st.cache_resource(show_spinner="Loading the 15-feature live Random Forest...")
+@st.cache_resource(show_spinner="Loading the 10-feature live Random Forest...")
 def load_live_model():
     """
-    Load the already-trained 15-feature Random Forest used for live inference.
+    Load the already-trained 10-feature Random Forest used for live inference.
 
     Deployment-safe path:
       small_random_forest_model.pkl
@@ -556,7 +552,7 @@ def load_live_model():
     A local-training fallback is intentionally kept for development machines
     that do not yet have the small model artifacts.
     """
-    # Preferred: pre-trained 15-feature model artifacts.
+    # Preferred: pre-trained 10-feature model artifacts.
     if SMALL_RF_PATH is not None:
         try:
             model = load_artifact(SMALL_RF_PATH)
@@ -567,7 +563,7 @@ def load_live_model():
             features = None if features_obj is None else [str(x) for x in features_obj]
 
             # If the feature file is missing, use the dashboard's fixed
-            # 15-feature schema only when it matches the model's input count.
+            # 10-feature schema only when it matches the model's input count.
             if features is None:
                 expected = getattr(model, "n_features_in_", None)
                 if expected == len(LIVE_FEATURES):
@@ -577,7 +573,8 @@ def load_live_model():
             if (
                 model is not None
                 and features is not None
-                and len(features) == len(LIVE_FEATURES)
+                and len(features) == 10
+                and len(LIVE_FEATURES) == 10
                 and (expected is None or expected == len(features))
             ):
                 return model, encoder, features
@@ -757,7 +754,7 @@ def auto_mapping(df):
 def run_live_prediction(X):
     if live_model is None or live_encoder is None:
         raise RuntimeError(
-            "The 15-feature live model is unavailable. "
+            "The 10-feature live model is unavailable. "
             "Make sure the three small-model .pkl files are in the project."
         )
 
@@ -802,7 +799,7 @@ render(
             Network Intrusion & Anomaly Detection System
         </h1>
         <p style="position:relative;z-index:2;margin:0;max-width:930px;line-height:1.65;">
-            An intelligent network-flow monitoring portal powered by a dedicated 15-feature
+            An intelligent network-flow monitoring portal powered by a dedicated 10-feature
             Random Forest inference engine for real-time traffic classification.
         </p>
         <div style="
